@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Update Manager",
+        "description": "Add Update Manager. After installation two switches will appear:\n\n• **Show updates in Settings** – hide or show the update badge in the Settings menu. Updates always remain visible on the Updates page.\n\n• **Show repairs in Settings** – hide or show the repairs badge in the Settings menu. Repairs always remain visible on the Repairs page."
+      }
+    },
+    "abort": {
+      "already_configured": "Update Manager is already configured."
+    }
+  }
+}

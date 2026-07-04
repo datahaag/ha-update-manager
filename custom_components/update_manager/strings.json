@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Update Manager instellen",
+        "description": "Voeg Update Manager toe. Na installatie verschijnen er twee schakelaars:\n\n• **Toon updates in Instellingen** – verberg of toon de update-badge in het Instellingen-menu. Updates blijven altijd zichtbaar op de Updatepagina.\n\n• **Toon reparaties in Instellingen** – verberg of toon de reparatie-badge in het Instellingen-menu. Reparaties blijven altijd zichtbaar op de Reparatiespagina."
+      }
+    },
+    "abort": {
+      "already_configured": "Update Manager is al geconfigureerd."
+    }
+  }
+}
