@@ -45,6 +45,7 @@ Reparaties blijven altijd zichtbaar op de **Reparatiespagina** (`/config/repairs
 3. Klik op **Toevoegen** en volg de wizard
 
 Er verschijnen twee schakelaars in je entiteiten.
+Alleen beheerders kunnen deze globale schakelaars handmatig bedienen; automatiseringen blijven werken.
 
 ---
 
