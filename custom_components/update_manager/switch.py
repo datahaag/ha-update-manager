@@ -97,8 +97,14 @@ class UpdateVisibilitySwitch(VisibilitySwitchEntity):
 
     async def _async_restore_managed_items(self) -> None:
         stored = await self._store.async_load()
-        if stored and isinstance(stored.get("hidden_entity_ids"), list):
-            self._hidden_by_us = set(stored["hidden_entity_ids"])
+        if isinstance(stored, dict) and isinstance(
+            stored.get("hidden_entity_ids"), list
+        ):
+            self._hidden_by_us = {
+                entity_id
+                for entity_id in stored["hidden_entity_ids"]
+                if isinstance(entity_id, str) and entity_id.startswith("update.")
+            }
 
     async def _async_sync_visibility(self) -> None:
         registry = er.async_get(self.hass)
@@ -109,7 +115,7 @@ class UpdateVisibilitySwitch(VisibilitySwitchEntity):
                 if reg_entry is None:
                     self._hidden_by_us.discard(entity_id)
                     continue
-                if reg_entry.hidden_by == _HIDDEN_BY:
+                if reg_entry.domain == "update" and reg_entry.hidden_by == _HIDDEN_BY:
                     registry.async_update_entity(entity_id, hidden_by=None)
                     _LOGGER.debug("Un-hiding update entity: %s", entity_id)
                 self._hidden_by_us.discard(entity_id)
@@ -131,8 +137,12 @@ class UpdateVisibilitySwitch(VisibilitySwitchEntity):
     def _handle_registry_change(self, event: Event) -> None:
         if event.data.get("action") != "create":
             return
-        entity_id: str = event.data.get("entity_id", "")
-        if not entity_id.startswith("update.") or self._is_on:
+        entity_id = event.data.get("entity_id")
+        if (
+            not isinstance(entity_id, str)
+            or not entity_id.startswith("update.")
+            or self._is_on
+        ):
             return
 
         registry = er.async_get(self.hass)
@@ -176,10 +186,20 @@ class RepairVisibilitySwitch(VisibilitySwitchEntity):
 
     async def _async_restore_managed_items(self) -> None:
         stored = await self._store.async_load()
-        if stored and isinstance(stored.get("ignored_issue_ids"), list):
+        if isinstance(stored, dict) and isinstance(
+            stored.get("ignored_issue_ids"), list
+        ):
             self._ignored_by_us = {
-                tuple(item) for item in stored["ignored_issue_ids"]
-                if isinstance(item, (list, tuple)) and len(item) == 2
+                (item[0], item[1])
+                for item in stored["ignored_issue_ids"]
+                if (
+                    isinstance(item, (list, tuple))
+                    and len(item) == 2
+                    and isinstance(item[0], str)
+                    and bool(item[0])
+                    and isinstance(item[1], str)
+                    and bool(item[1])
+                )
             }
 
     async def _async_sync_visibility(self) -> None:
@@ -223,9 +243,14 @@ class RepairVisibilitySwitch(VisibilitySwitchEntity):
         if event.data.get("action") != "create":
             return
 
-        domain: str = event.data.get("domain", "")
-        issue_id: str = event.data.get("issue_id", "")
-        if not domain or not issue_id:
+        domain = event.data.get("domain")
+        issue_id = event.data.get("issue_id")
+        if (
+            not isinstance(domain, str)
+            or not domain
+            or not isinstance(issue_id, str)
+            or not issue_id
+        ):
             return
 
         issue_registry = _get_issue_registry(self.hass)

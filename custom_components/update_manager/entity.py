@@ -5,7 +5,8 @@ from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.const import STATE_ON
-from homeassistant.core import Event, HomeAssistant
+from homeassistant.core import Context, Event, HomeAssistant
+from homeassistant.exceptions import Unauthorized
 from homeassistant.helpers import storage
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -55,9 +56,18 @@ class VisibilitySwitchEntity(RestoreEntity, SwitchEntity):
         await self._async_set_state(False)
 
     async def _async_set_state(self, is_on: bool) -> None:
+        await self._async_require_admin(self._context)
         self._is_on = is_on
         await self._async_sync_visibility()
         self.async_write_ha_state()
+
+    async def _async_require_admin(self, context: Context | None) -> None:
+        if context is None or context.user_id is None:
+            return
+
+        user = await self.hass.auth.async_get_user(context.user_id)
+        if user is None or not user.is_admin:
+            raise Unauthorized(context=context)
 
     async def _async_restore_managed_items(self) -> None:
         raise NotImplementedError
