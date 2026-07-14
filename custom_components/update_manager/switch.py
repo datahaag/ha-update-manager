@@ -65,12 +65,12 @@ async def async_setup_entry(
 def _get_issue_registry(hass: HomeAssistant) -> Any | None:
     """Return the repairs issue registry, or None if the component is not loaded."""
     try:
-        from homeassistant.components.repairs.issue_registry import (
+        from homeassistant.helpers.issue_registry import (
             async_get as async_get_issue_registry,
         )
         return async_get_issue_registry(hass)
     except ImportError:
-        _LOGGER.warning("homeassistant.components.repairs not available")
+        _LOGGER.warning("homeassistant issue registry not available")
         return None
 
 
@@ -268,14 +268,14 @@ class RepairVisibilitySwitch(RestoreEntity, SwitchEntity):
                     # Issue resolved itself; drop from tracking
                     self._ignored_by_us.discard(issue_key)
                     continue
-                if issue.ignored:
+                if issue.dismissed_version is not None:
                     issue_registry.async_ignore(domain, issue_id, False)
                     _LOGGER.debug("Un-ignoring repair issue: %s/%s", domain, issue_id)
                 self._ignored_by_us.discard(issue_key)
         else:
             # Ignore all currently active (non-ignored) issues
             for (domain, issue_id), issue in issue_registry.issues.items():
-                if not issue.ignored and not issue.dismissed_version:
+                if issue.dismissed_version is None:
                     issue_registry.async_ignore(domain, issue_id, True)
                     self._ignored_by_us.add((domain, issue_id))
                     _LOGGER.debug("Ignoring repair issue: %s/%s", domain, issue_id)
@@ -305,7 +305,7 @@ class RepairVisibilitySwitch(RestoreEntity, SwitchEntity):
             return
 
         issue = issue_registry.issues.get((domain, issue_id))
-        if issue is None or issue.ignored:
+        if issue is None or issue.dismissed_version is not None:
             return
 
         issue_registry.async_ignore(domain, issue_id, True)
