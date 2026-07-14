@@ -19,17 +19,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import Context, HomeAssistant, callback
-from homeassistant.exceptions import Unauthorized
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import storage
-from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import DOMAIN, STORAGE_KEY_REPAIRS, STORAGE_KEY_UPDATES, STORAGE_VERSION
+from .entity import VisibilitySwitchEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -52,8 +49,8 @@ async def async_setup_entry(
 
     async_add_entities(
         [
-            UpdateVisibilitySwitch(hass, entry, update_store),
-            RepairVisibilitySwitch(hass, entry, repair_store),
+            UpdateVisibilitySwitch(hass, update_store),
+            RepairVisibilitySwitch(hass, repair_store),
         ],
         update_before_add=True,
     )
@@ -75,63 +72,30 @@ def _get_issue_registry(hass: HomeAssistant) -> Any | None:
         return None
 
 
-async def _async_require_admin(
-    hass: HomeAssistant,
-    context: Context | None,
-) -> None:
-    """Require admin access for user-initiated visibility changes."""
-    if context is None or context.user_id is None:
-        return
-
-    user = await hass.auth.async_get_user(context.user_id)
-    if user is None or not user.is_admin:
-        raise Unauthorized(context=context)
-
-
 # ---------------------------------------------------------------------------
 # Switch 1 – Updates
 # ---------------------------------------------------------------------------
 
-class UpdateVisibilitySwitch(RestoreEntity, SwitchEntity):
+class UpdateVisibilitySwitch(VisibilitySwitchEntity):
     """Global switch: show/hide update entities in the Settings badge.
 
     Tracks which entity_ids it hides so it only restores exactly those
     on turn-on; externally hidden entities are never touched.
     """
 
-    _attr_has_entity_name = True
     _attr_name = "Toon updates in Instellingen"
     _attr_icon = "mdi:package-up"
-    _attr_entity_category = EntityCategory.CONFIG
+    _registry_event = er.EVENT_ENTITY_REGISTRY_UPDATED
 
     def __init__(
         self,
         hass: HomeAssistant,
-        entry: ConfigEntry,
         store: storage.Store,
     ) -> None:
-        self.hass = hass
-        self._entry = entry
-        self._store = store
-        self._attr_unique_id = f"{DOMAIN}_show_updates_in_settings"
-        self._is_on: bool = True
+        super().__init__(hass, store, f"{DOMAIN}_show_updates_in_settings")
         self._hidden_by_us: set[str] = set()
 
-    @property
-    def is_on(self) -> bool:
-        return self._is_on
-
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-
-        try:
-            stored = await self._store.async_load()
-        except Exception:  # noqa: BLE001 - never let a corrupt store block setup
-            _LOGGER.exception(
-                "Failed to load stored state for %s; starting from an empty set",
-                self._attr_unique_id,
-            )
-            stored = None
+    def _restore_managed_items(self, stored: object | None) -> None:
         if isinstance(stored, dict) and isinstance(
             stored.get("hidden_entity_ids"), list
         ):
@@ -141,31 +105,7 @@ class UpdateVisibilitySwitch(RestoreEntity, SwitchEntity):
                 if isinstance(entity_id, str) and entity_id.startswith("update.")
             }
 
-        last_state = await self.async_get_last_state()
-        self._is_on = last_state.state == "on" if last_state is not None else True
-
-        await self._sync_visibility()
-
-        self.async_on_remove(
-            self.hass.bus.async_listen(
-                er.EVENT_ENTITY_REGISTRY_UPDATED,
-                self._handle_registry_change,
-            )
-        )
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        await _async_require_admin(self.hass, self._context)
-        self._is_on = True
-        await self._sync_visibility()
-        self.async_write_ha_state()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        await _async_require_admin(self.hass, self._context)
-        self._is_on = False
-        await self._sync_visibility()
-        self.async_write_ha_state()
-
-    async def _sync_visibility(self) -> None:
+    async def _async_sync_visibility(self) -> None:
         registry = er.async_get(self.hass)
 
         if self._is_on:
@@ -200,18 +140,13 @@ class UpdateVisibilitySwitch(RestoreEntity, SwitchEntity):
                     self._hidden_by_us.add(reg_entry.entity_id)
                     _LOGGER.debug("Hiding update entity: %s", reg_entry.entity_id)
 
-        await self._persist()
+        await self._async_persist_managed_items()
 
-    async def _persist(self) -> None:
-        try:
-            await self._store.async_save(
-                {"hidden_entity_ids": list(self._hidden_by_us)}
-            )
-        except Exception:  # noqa: BLE001 - persistence failure must not crash
-            _LOGGER.exception("Failed to persist hidden update entity state")
+    def _managed_items_storage_data(self) -> dict[str, object]:
+        return {"hidden_entity_ids": list(self._hidden_by_us)}
 
     @callback
-    def _handle_registry_change(self, event: Any) -> None:
+    def _handle_registry_change(self, event: Event) -> None:
         if event.data.get("action") != "create":
             return
         entity_id = event.data.get("entity_id")
@@ -236,14 +171,14 @@ class UpdateVisibilitySwitch(RestoreEntity, SwitchEntity):
             return
         self._hidden_by_us.add(entity_id)
         _LOGGER.debug("Hiding newly registered update entity: %s", entity_id)
-        self.hass.async_create_task(self._persist())
+        self.hass.async_create_task(self._async_persist_managed_items())
 
 
 # ---------------------------------------------------------------------------
 # Switch 2 – Repairs
 # ---------------------------------------------------------------------------
 
-class RepairVisibilitySwitch(RestoreEntity, SwitchEntity):
+class RepairVisibilitySwitch(VisibilitySwitchEntity):
     """Global switch: show/hide repair issues in the Settings badge.
 
     When OFF, all active (non-ignored) repair issues are marked as ignored,
@@ -255,40 +190,19 @@ class RepairVisibilitySwitch(RestoreEntity, SwitchEntity):
     restores only those; issues already ignored by something else are untouched.
     """
 
-    _attr_has_entity_name = True
     _attr_name = "Toon reparaties in Instellingen"
     _attr_icon = "mdi:wrench-clock"
-    _attr_entity_category = EntityCategory.CONFIG
+    _registry_event = "repairs_issue_registry_updated"
 
     def __init__(
         self,
         hass: HomeAssistant,
-        entry: ConfigEntry,
         store: storage.Store,
     ) -> None:
-        self.hass = hass
-        self._entry = entry
-        self._store = store
-        self._attr_unique_id = f"{DOMAIN}_show_repairs_in_settings"
-        self._is_on: bool = True
-        # Set of (domain, issue_id) tuples we ignored
+        super().__init__(hass, store, f"{DOMAIN}_show_repairs_in_settings")
         self._ignored_by_us: set[tuple[str, str]] = set()
 
-    @property
-    def is_on(self) -> bool:
-        return self._is_on
-
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-
-        try:
-            stored = await self._store.async_load()
-        except Exception:  # noqa: BLE001 - never let a corrupt store block setup
-            _LOGGER.exception(
-                "Failed to load stored state for %s; starting from an empty set",
-                self._attr_unique_id,
-            )
-            stored = None
+    def _restore_managed_items(self, stored: object | None) -> None:
         if isinstance(stored, dict) and isinstance(
             stored.get("ignored_issue_ids"), list
         ):
@@ -305,32 +219,7 @@ class RepairVisibilitySwitch(RestoreEntity, SwitchEntity):
                 )
             }
 
-        last_state = await self.async_get_last_state()
-        self._is_on = last_state.state == "on" if last_state is not None else True
-
-        await self._sync_visibility()
-
-        # Listen for new repair issues
-        self.async_on_remove(
-            self.hass.bus.async_listen(
-                "repairs_issue_registry_updated",
-                self._handle_repairs_change,
-            )
-        )
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        await _async_require_admin(self.hass, self._context)
-        self._is_on = True
-        await self._sync_visibility()
-        self.async_write_ha_state()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        await _async_require_admin(self.hass, self._context)
-        self._is_on = False
-        await self._sync_visibility()
-        self.async_write_ha_state()
-
-    async def _sync_visibility(self) -> None:
+    async def _async_sync_visibility(self) -> None:
         issue_registry = _get_issue_registry(self.hass)
         if issue_registry is None:
             return
@@ -370,18 +259,15 @@ class RepairVisibilitySwitch(RestoreEntity, SwitchEntity):
                     self._ignored_by_us.add((domain, issue_id))
                     _LOGGER.debug("Ignoring repair issue: %s/%s", domain, issue_id)
 
-        await self._persist()
+        await self._async_persist_managed_items()
 
-    async def _persist(self) -> None:
-        try:
-            await self._store.async_save(
-                {"ignored_issue_ids": [list(item) for item in self._ignored_by_us]}
-            )
-        except Exception:  # noqa: BLE001 - persistence failure must not crash
-            _LOGGER.exception("Failed to persist ignored repair issue state")
+    def _managed_items_storage_data(self) -> dict[str, object]:
+        return {
+            "ignored_issue_ids": [list(item) for item in self._ignored_by_us]
+        }
 
     @callback
-    def _handle_repairs_change(self, event: Any) -> None:
+    def _handle_registry_change(self, event: Event) -> None:
         """Hide a newly created repair issue if the switch is OFF."""
         if self._is_on:
             return
@@ -415,4 +301,4 @@ class RepairVisibilitySwitch(RestoreEntity, SwitchEntity):
             return
         self._ignored_by_us.add((domain, issue_id))
         _LOGGER.debug("Ignoring newly created repair issue: %s/%s", domain, issue_id)
-        self.hass.async_create_task(self._persist())
+        self.hass.async_create_task(self._async_persist_managed_items())
