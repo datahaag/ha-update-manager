@@ -110,7 +110,14 @@ class UpdateVisibilitySwitch(RestoreEntity, SwitchEntity):
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
 
-        stored = await self._store.async_load()
+        try:
+            stored = await self._store.async_load()
+        except Exception:  # noqa: BLE001 - never let a corrupt store block setup
+            _LOGGER.exception(
+                "Failed to load stored state for %s; starting from an empty set",
+                self._attr_unique_id,
+            )
+            stored = None
         if stored and isinstance(stored.get("hidden_entity_ids"), list):
             self._hidden_by_us = set(stored["hidden_entity_ids"])
 
@@ -146,22 +153,40 @@ class UpdateVisibilitySwitch(RestoreEntity, SwitchEntity):
                     self._hidden_by_us.discard(entity_id)
                     continue
                 if reg_entry.hidden_by == _HIDDEN_BY:
-                    registry.async_update_entity(entity_id, hidden_by=None)
+                    try:
+                        registry.async_update_entity(entity_id, hidden_by=None)
+                    except Exception:  # noqa: BLE001 - keep syncing the rest
+                        _LOGGER.exception(
+                            "Failed to un-hide update entity %s; will retry later",
+                            entity_id,
+                        )
+                        continue
                     _LOGGER.debug("Un-hiding update entity: %s", entity_id)
                 self._hidden_by_us.discard(entity_id)
         else:
             for reg_entry in registry.entities.values():
                 if reg_entry.domain == "update" and reg_entry.hidden_by is None:
-                    registry.async_update_entity(
-                        reg_entry.entity_id, hidden_by=_HIDDEN_BY
-                    )
+                    try:
+                        registry.async_update_entity(
+                            reg_entry.entity_id, hidden_by=_HIDDEN_BY
+                        )
+                    except Exception:  # noqa: BLE001 - keep syncing the rest
+                        _LOGGER.exception(
+                            "Failed to hide update entity %s", reg_entry.entity_id
+                        )
+                        continue
                     self._hidden_by_us.add(reg_entry.entity_id)
                     _LOGGER.debug("Hiding update entity: %s", reg_entry.entity_id)
 
         await self._persist()
 
     async def _persist(self) -> None:
-        await self._store.async_save({"hidden_entity_ids": list(self._hidden_by_us)})
+        try:
+            await self._store.async_save(
+                {"hidden_entity_ids": list(self._hidden_by_us)}
+            )
+        except Exception:  # noqa: BLE001 - persistence failure must not crash
+            _LOGGER.exception("Failed to persist hidden update entity state")
 
     @callback
     def _handle_registry_change(self, event: Any) -> None:
@@ -176,7 +201,13 @@ class UpdateVisibilitySwitch(RestoreEntity, SwitchEntity):
         if reg_entry is None or reg_entry.hidden_by is not None:
             return
 
-        registry.async_update_entity(entity_id, hidden_by=_HIDDEN_BY)
+        try:
+            registry.async_update_entity(entity_id, hidden_by=_HIDDEN_BY)
+        except Exception:  # noqa: BLE001 - don't propagate into the event bus
+            _LOGGER.exception(
+                "Failed to hide newly registered update entity %s", entity_id
+            )
+            return
         self._hidden_by_us.add(entity_id)
         _LOGGER.debug("Hiding newly registered update entity: %s", entity_id)
         self.hass.async_create_task(self._persist())
@@ -224,7 +255,14 @@ class RepairVisibilitySwitch(RestoreEntity, SwitchEntity):
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
 
-        stored = await self._store.async_load()
+        try:
+            stored = await self._store.async_load()
+        except Exception:  # noqa: BLE001 - never let a corrupt store block setup
+            _LOGGER.exception(
+                "Failed to load stored state for %s; starting from an empty set",
+                self._attr_unique_id,
+            )
+            stored = None
         if stored and isinstance(stored.get("ignored_issue_ids"), list):
             self._ignored_by_us = {
                 tuple(item) for item in stored["ignored_issue_ids"]
@@ -269,23 +307,40 @@ class RepairVisibilitySwitch(RestoreEntity, SwitchEntity):
                     self._ignored_by_us.discard(issue_key)
                     continue
                 if issue.ignored:
-                    issue_registry.async_ignore(domain, issue_id, False)
+                    try:
+                        issue_registry.async_ignore(domain, issue_id, False)
+                    except Exception:  # noqa: BLE001 - keep syncing the rest
+                        _LOGGER.exception(
+                            "Failed to un-ignore repair issue %s/%s; will retry later",
+                            domain,
+                            issue_id,
+                        )
+                        continue
                     _LOGGER.debug("Un-ignoring repair issue: %s/%s", domain, issue_id)
                 self._ignored_by_us.discard(issue_key)
         else:
             # Ignore all currently active (non-ignored) issues
             for (domain, issue_id), issue in issue_registry.issues.items():
                 if not issue.ignored and not issue.dismissed_version:
-                    issue_registry.async_ignore(domain, issue_id, True)
+                    try:
+                        issue_registry.async_ignore(domain, issue_id, True)
+                    except Exception:  # noqa: BLE001 - keep syncing the rest
+                        _LOGGER.exception(
+                            "Failed to ignore repair issue %s/%s", domain, issue_id
+                        )
+                        continue
                     self._ignored_by_us.add((domain, issue_id))
                     _LOGGER.debug("Ignoring repair issue: %s/%s", domain, issue_id)
 
         await self._persist()
 
     async def _persist(self) -> None:
-        await self._store.async_save(
-            {"ignored_issue_ids": [list(item) for item in self._ignored_by_us]}
-        )
+        try:
+            await self._store.async_save(
+                {"ignored_issue_ids": [list(item) for item in self._ignored_by_us]}
+            )
+        except Exception:  # noqa: BLE001 - persistence failure must not crash
+            _LOGGER.exception("Failed to persist ignored repair issue state")
 
     @callback
     def _handle_repairs_change(self, event: Any) -> None:
@@ -308,7 +363,13 @@ class RepairVisibilitySwitch(RestoreEntity, SwitchEntity):
         if issue is None or issue.ignored:
             return
 
-        issue_registry.async_ignore(domain, issue_id, True)
+        try:
+            issue_registry.async_ignore(domain, issue_id, True)
+        except Exception:  # noqa: BLE001 - don't propagate into the event bus
+            _LOGGER.exception(
+                "Failed to ignore newly created repair issue %s/%s", domain, issue_id
+            )
+            return
         self._ignored_by_us.add((domain, issue_id))
         _LOGGER.debug("Ignoring newly created repair issue: %s/%s", domain, issue_id)
         self.hass.async_create_task(self._persist())
