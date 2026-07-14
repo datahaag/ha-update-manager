@@ -1,6 +1,7 @@
 """Shared entity helpers for Update Manager."""
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
@@ -10,6 +11,8 @@ from homeassistant.exceptions import Unauthorized
 from homeassistant.helpers import storage
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.restore_state import RestoreEntity
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class VisibilitySwitchEntity(RestoreEntity, SwitchEntity):
@@ -36,7 +39,7 @@ class VisibilitySwitchEntity(RestoreEntity, SwitchEntity):
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
-        await self._async_restore_managed_items()
+        self._restore_managed_items(await self._async_load_stored_state())
 
         last_state = await self.async_get_last_state()
         self._is_on = last_state is None or last_state.state == STATE_ON
@@ -69,7 +72,29 @@ class VisibilitySwitchEntity(RestoreEntity, SwitchEntity):
         if user is None or not user.is_admin:
             raise Unauthorized(context=context)
 
-    async def _async_restore_managed_items(self) -> None:
+    async def _async_load_stored_state(self) -> object | None:
+        try:
+            return await self._store.async_load()
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception(
+                "Failed to load stored state for %s; starting from an empty set",
+                self._attr_unique_id,
+            )
+            return None
+
+    async def _async_persist_managed_items(self) -> None:
+        try:
+            await self._store.async_save(self._managed_items_storage_data())
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception(
+                "Failed to persist stored state for %s",
+                self._attr_unique_id,
+            )
+
+    def _restore_managed_items(self, stored: object | None) -> None:
+        raise NotImplementedError
+
+    def _managed_items_storage_data(self) -> dict[str, object]:
         raise NotImplementedError
 
     async def _async_sync_visibility(self) -> None:

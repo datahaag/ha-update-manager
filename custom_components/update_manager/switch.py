@@ -95,8 +95,7 @@ class UpdateVisibilitySwitch(VisibilitySwitchEntity):
         super().__init__(hass, store, f"{DOMAIN}_show_updates_in_settings")
         self._hidden_by_us: set[str] = set()
 
-    async def _async_restore_managed_items(self) -> None:
-        stored = await self._store.async_load()
+    def _restore_managed_items(self, stored: object | None) -> None:
         if isinstance(stored, dict) and isinstance(
             stored.get("hidden_entity_ids"), list
         ):
@@ -116,22 +115,35 @@ class UpdateVisibilitySwitch(VisibilitySwitchEntity):
                     self._hidden_by_us.discard(entity_id)
                     continue
                 if reg_entry.domain == "update" and reg_entry.hidden_by == _HIDDEN_BY:
-                    registry.async_update_entity(entity_id, hidden_by=None)
+                    try:
+                        registry.async_update_entity(entity_id, hidden_by=None)
+                    except Exception:  # noqa: BLE001 - keep syncing the rest
+                        _LOGGER.exception(
+                            "Failed to un-hide update entity %s; will retry later",
+                            entity_id,
+                        )
+                        continue
                     _LOGGER.debug("Un-hiding update entity: %s", entity_id)
                 self._hidden_by_us.discard(entity_id)
         else:
             for reg_entry in registry.entities.values():
                 if reg_entry.domain == "update" and reg_entry.hidden_by is None:
-                    registry.async_update_entity(
-                        reg_entry.entity_id, hidden_by=_HIDDEN_BY
-                    )
+                    try:
+                        registry.async_update_entity(
+                            reg_entry.entity_id, hidden_by=_HIDDEN_BY
+                        )
+                    except Exception:  # noqa: BLE001 - keep syncing the rest
+                        _LOGGER.exception(
+                            "Failed to hide update entity %s", reg_entry.entity_id
+                        )
+                        continue
                     self._hidden_by_us.add(reg_entry.entity_id)
                     _LOGGER.debug("Hiding update entity: %s", reg_entry.entity_id)
 
-        await self._persist()
+        await self._async_persist_managed_items()
 
-    async def _persist(self) -> None:
-        await self._store.async_save({"hidden_entity_ids": list(self._hidden_by_us)})
+    def _managed_items_storage_data(self) -> dict[str, object]:
+        return {"hidden_entity_ids": list(self._hidden_by_us)}
 
     @callback
     def _handle_registry_change(self, event: Event) -> None:
@@ -150,10 +162,16 @@ class UpdateVisibilitySwitch(VisibilitySwitchEntity):
         if reg_entry is None or reg_entry.hidden_by is not None:
             return
 
-        registry.async_update_entity(entity_id, hidden_by=_HIDDEN_BY)
+        try:
+            registry.async_update_entity(entity_id, hidden_by=_HIDDEN_BY)
+        except Exception:  # noqa: BLE001 - don't propagate into the event bus
+            _LOGGER.exception(
+                "Failed to hide newly registered update entity %s", entity_id
+            )
+            return
         self._hidden_by_us.add(entity_id)
         _LOGGER.debug("Hiding newly registered update entity: %s", entity_id)
-        self.hass.async_create_task(self._persist())
+        self.hass.async_create_task(self._async_persist_managed_items())
 
 
 # ---------------------------------------------------------------------------
@@ -184,8 +202,7 @@ class RepairVisibilitySwitch(VisibilitySwitchEntity):
         super().__init__(hass, store, f"{DOMAIN}_show_repairs_in_settings")
         self._ignored_by_us: set[tuple[str, str]] = set()
 
-    async def _async_restore_managed_items(self) -> None:
-        stored = await self._store.async_load()
+    def _restore_managed_items(self, stored: object | None) -> None:
         if isinstance(stored, dict) and isinstance(
             stored.get("ignored_issue_ids"), list
         ):
@@ -217,23 +234,37 @@ class RepairVisibilitySwitch(VisibilitySwitchEntity):
                     self._ignored_by_us.discard(issue_key)
                     continue
                 if issue.ignored:
-                    issue_registry.async_ignore(domain, issue_id, False)
+                    try:
+                        issue_registry.async_ignore(domain, issue_id, False)
+                    except Exception:  # noqa: BLE001 - keep syncing the rest
+                        _LOGGER.exception(
+                            "Failed to un-ignore repair issue %s/%s; will retry later",
+                            domain,
+                            issue_id,
+                        )
+                        continue
                     _LOGGER.debug("Un-ignoring repair issue: %s/%s", domain, issue_id)
                 self._ignored_by_us.discard(issue_key)
         else:
             # Ignore all currently active (non-ignored) issues
             for (domain, issue_id), issue in issue_registry.issues.items():
                 if not issue.ignored and not issue.dismissed_version:
-                    issue_registry.async_ignore(domain, issue_id, True)
+                    try:
+                        issue_registry.async_ignore(domain, issue_id, True)
+                    except Exception:  # noqa: BLE001 - keep syncing the rest
+                        _LOGGER.exception(
+                            "Failed to ignore repair issue %s/%s", domain, issue_id
+                        )
+                        continue
                     self._ignored_by_us.add((domain, issue_id))
                     _LOGGER.debug("Ignoring repair issue: %s/%s", domain, issue_id)
 
-        await self._persist()
+        await self._async_persist_managed_items()
 
-    async def _persist(self) -> None:
-        await self._store.async_save(
-            {"ignored_issue_ids": [list(item) for item in self._ignored_by_us]}
-        )
+    def _managed_items_storage_data(self) -> dict[str, object]:
+        return {
+            "ignored_issue_ids": [list(item) for item in self._ignored_by_us]
+        }
 
     @callback
     def _handle_registry_change(self, event: Event) -> None:
@@ -261,7 +292,13 @@ class RepairVisibilitySwitch(VisibilitySwitchEntity):
         if issue is None or issue.ignored:
             return
 
-        issue_registry.async_ignore(domain, issue_id, True)
+        try:
+            issue_registry.async_ignore(domain, issue_id, True)
+        except Exception:  # noqa: BLE001 - don't propagate into the event bus
+            _LOGGER.exception(
+                "Failed to ignore newly created repair issue %s/%s", domain, issue_id
+            )
+            return
         self._ignored_by_us.add((domain, issue_id))
         _LOGGER.debug("Ignoring newly created repair issue: %s/%s", domain, issue_id)
-        self.hass.async_create_task(self._persist())
+        self.hass.async_create_task(self._async_persist_managed_items())
