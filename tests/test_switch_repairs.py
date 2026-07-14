@@ -26,11 +26,18 @@ _PATCH_TARGET = "custom_components.update_manager.switch._get_issue_registry"
 
 
 class FakeIssue:
-    """Minimal stand-in for a repairs ``IssueEntry``."""
+    """Minimal stand-in for a repairs ``IssueEntry``.
 
-    def __init__(self, ignored: bool = False, dismissed_version=None) -> None:
-        self.ignored = ignored
+    In Home Assistant an issue is "ignored" iff ``dismissed_version`` is set,
+    so that is the single source of truth here; ``ignored`` is derived from it.
+    """
+
+    def __init__(self, dismissed_version: str | None = None) -> None:
         self.dismissed_version = dismissed_version
+
+    @property
+    def ignored(self) -> bool:
+        return self.dismissed_version is not None
 
 
 class FakeIssueRegistry:
@@ -43,7 +50,10 @@ class FakeIssueRegistry:
         self.issues[(domain, issue_id)] = issue
 
     def async_ignore(self, domain: str, issue_id: str, ignore: bool) -> None:
-        self.issues[(domain, issue_id)].ignored = ignore
+        # Mirrors HA: ignoring stamps a version, un-ignoring clears it.
+        self.issues[(domain, issue_id)].dismissed_version = (
+            "test" if ignore else None
+        )
 
 
 @pytest.fixture
@@ -69,7 +79,7 @@ async def _call(hass, service: str) -> None:
 async def test_turn_off_ignores_active_issues(hass, issue_registry, hass_storage):
     """Turning off ignores active issues but leaves ignored/dismissed ones alone."""
     active = FakeIssue()
-    already_ignored = FakeIssue(ignored=True)
+    already_ignored = FakeIssue(dismissed_version="ignored")
     dismissed = FakeIssue(dismissed_version="1.2.3")
     issue_registry.add("hue", "bulb", active)
     issue_registry.add("cast", "old", already_ignored)
@@ -81,7 +91,8 @@ async def test_turn_off_ignores_active_issues(hass, issue_registry, hass_storage
 
     assert hass.states.get(SWITCH).state == STATE_OFF
     assert active.ignored is True
-    assert dismissed.ignored is False  # dismissed issues are skipped
+    assert already_ignored.ignored is True  # already-ignored issues untouched
+    assert dismissed.ignored is True  # dismissed issues are skipped
 
     stored = hass_storage[STORAGE_KEY_REPAIRS]["data"]["ignored_issue_ids"]
     assert stored == [["hue", "bulb"]]
@@ -90,7 +101,7 @@ async def test_turn_off_ignores_active_issues(hass, issue_registry, hass_storage
 async def test_turn_on_unignores_only_ours(hass, issue_registry):
     """Turning on restores only issues the switch ignored itself."""
     ours = FakeIssue()
-    other = FakeIssue(ignored=True)
+    other = FakeIssue(dismissed_version="ignored")
     issue_registry.add("hue", "bulb", ours)
     issue_registry.add("cast", "old", other)
 
@@ -138,7 +149,7 @@ async def test_restore_tracked_ids_from_store(hass, issue_registry, hass_storage
         "version": 1,
         "data": {"ignored_issue_ids": [["hue", "bulb"], ["bad"]]},
     }
-    issue = FakeIssue(ignored=True)
+    issue = FakeIssue(dismissed_version="ignored")
     issue_registry.add("hue", "bulb", issue)
 
     with patch(_PATCH_TARGET, return_value=issue_registry):
@@ -242,14 +253,12 @@ async def test_get_issue_registry_returns_registry_when_importable(hass):
     from custom_components.update_manager import switch as switch_module
 
     sentinel = object()
-    fake_module = types.ModuleType(
-        "homeassistant.components.repairs.issue_registry"
-    )
+    fake_module = types.ModuleType("homeassistant.helpers.issue_registry")
     fake_module.async_get = lambda _hass: sentinel
 
     with patch.dict(
         sys.modules,
-        {"homeassistant.components.repairs.issue_registry": fake_module},
+        {"homeassistant.helpers.issue_registry": fake_module},
     ):
         assert switch_module._get_issue_registry(hass) is sentinel
 
@@ -260,6 +269,6 @@ async def test_get_issue_registry_returns_none_when_missing(hass):
 
     with patch.dict(
         sys.modules,
-        {"homeassistant.components.repairs.issue_registry": None},
+        {"homeassistant.helpers.issue_registry": None},
     ):
         assert switch_module._get_issue_registry(hass) is None
