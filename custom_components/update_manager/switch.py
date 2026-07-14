@@ -19,16 +19,14 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import storage
-from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import DOMAIN, STORAGE_KEY_REPAIRS, STORAGE_KEY_UPDATES, STORAGE_VERSION
+from .entity import VisibilitySwitchEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -51,8 +49,8 @@ async def async_setup_entry(
 
     async_add_entities(
         [
-            UpdateVisibilitySwitch(hass, entry, update_store),
-            RepairVisibilitySwitch(hass, entry, repair_store),
+            UpdateVisibilitySwitch(hass, update_store),
+            RepairVisibilitySwitch(hass, repair_store),
         ],
         update_before_add=True,
     )
@@ -78,65 +76,31 @@ def _get_issue_registry(hass: HomeAssistant) -> Any | None:
 # Switch 1 – Updates
 # ---------------------------------------------------------------------------
 
-class UpdateVisibilitySwitch(RestoreEntity, SwitchEntity):
+class UpdateVisibilitySwitch(VisibilitySwitchEntity):
     """Global switch: show/hide update entities in the Settings badge.
 
     Tracks which entity_ids it hides so it only restores exactly those
     on turn-on; externally hidden entities are never touched.
     """
 
-    _attr_has_entity_name = True
     _attr_name = "Toon updates in Instellingen"
     _attr_icon = "mdi:package-up"
-    _attr_entity_category = EntityCategory.CONFIG
+    _registry_event = er.EVENT_ENTITY_REGISTRY_UPDATED
 
     def __init__(
         self,
         hass: HomeAssistant,
-        entry: ConfigEntry,
         store: storage.Store,
     ) -> None:
-        self.hass = hass
-        self._entry = entry
-        self._store = store
-        self._attr_unique_id = f"{DOMAIN}_show_updates_in_settings"
-        self._is_on: bool = True
+        super().__init__(hass, store, f"{DOMAIN}_show_updates_in_settings")
         self._hidden_by_us: set[str] = set()
 
-    @property
-    def is_on(self) -> bool:
-        return self._is_on
-
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-
+    async def _async_restore_managed_items(self) -> None:
         stored = await self._store.async_load()
         if stored and isinstance(stored.get("hidden_entity_ids"), list):
             self._hidden_by_us = set(stored["hidden_entity_ids"])
 
-        last_state = await self.async_get_last_state()
-        self._is_on = last_state.state == "on" if last_state is not None else True
-
-        await self._sync_visibility()
-
-        self.async_on_remove(
-            self.hass.bus.async_listen(
-                er.EVENT_ENTITY_REGISTRY_UPDATED,
-                self._handle_registry_change,
-            )
-        )
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        self._is_on = True
-        await self._sync_visibility()
-        self.async_write_ha_state()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        self._is_on = False
-        await self._sync_visibility()
-        self.async_write_ha_state()
-
-    async def _sync_visibility(self) -> None:
+    async def _async_sync_visibility(self) -> None:
         registry = er.async_get(self.hass)
 
         if self._is_on:
@@ -164,7 +128,7 @@ class UpdateVisibilitySwitch(RestoreEntity, SwitchEntity):
         await self._store.async_save({"hidden_entity_ids": list(self._hidden_by_us)})
 
     @callback
-    def _handle_registry_change(self, event: Any) -> None:
+    def _handle_registry_change(self, event: Event) -> None:
         if event.data.get("action") != "create":
             return
         entity_id: str = event.data.get("entity_id", "")
@@ -186,7 +150,7 @@ class UpdateVisibilitySwitch(RestoreEntity, SwitchEntity):
 # Switch 2 – Repairs
 # ---------------------------------------------------------------------------
 
-class RepairVisibilitySwitch(RestoreEntity, SwitchEntity):
+class RepairVisibilitySwitch(VisibilitySwitchEntity):
     """Global switch: show/hide repair issues in the Settings badge.
 
     When OFF, all active (non-ignored) repair issues are marked as ignored,
@@ -198,32 +162,19 @@ class RepairVisibilitySwitch(RestoreEntity, SwitchEntity):
     restores only those; issues already ignored by something else are untouched.
     """
 
-    _attr_has_entity_name = True
     _attr_name = "Toon reparaties in Instellingen"
     _attr_icon = "mdi:wrench-clock"
-    _attr_entity_category = EntityCategory.CONFIG
+    _registry_event = "repairs_issue_registry_updated"
 
     def __init__(
         self,
         hass: HomeAssistant,
-        entry: ConfigEntry,
         store: storage.Store,
     ) -> None:
-        self.hass = hass
-        self._entry = entry
-        self._store = store
-        self._attr_unique_id = f"{DOMAIN}_show_repairs_in_settings"
-        self._is_on: bool = True
-        # Set of (domain, issue_id) tuples we ignored
+        super().__init__(hass, store, f"{DOMAIN}_show_repairs_in_settings")
         self._ignored_by_us: set[tuple[str, str]] = set()
 
-    @property
-    def is_on(self) -> bool:
-        return self._is_on
-
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-
+    async def _async_restore_managed_items(self) -> None:
         stored = await self._store.async_load()
         if stored and isinstance(stored.get("ignored_issue_ids"), list):
             self._ignored_by_us = {
@@ -231,30 +182,7 @@ class RepairVisibilitySwitch(RestoreEntity, SwitchEntity):
                 if isinstance(item, (list, tuple)) and len(item) == 2
             }
 
-        last_state = await self.async_get_last_state()
-        self._is_on = last_state.state == "on" if last_state is not None else True
-
-        await self._sync_visibility()
-
-        # Listen for new repair issues
-        self.async_on_remove(
-            self.hass.bus.async_listen(
-                "repairs_issue_registry_updated",
-                self._handle_repairs_change,
-            )
-        )
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        self._is_on = True
-        await self._sync_visibility()
-        self.async_write_ha_state()
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        self._is_on = False
-        await self._sync_visibility()
-        self.async_write_ha_state()
-
-    async def _sync_visibility(self) -> None:
+    async def _async_sync_visibility(self) -> None:
         issue_registry = _get_issue_registry(self.hass)
         if issue_registry is None:
             return
@@ -288,7 +216,7 @@ class RepairVisibilitySwitch(RestoreEntity, SwitchEntity):
         )
 
     @callback
-    def _handle_repairs_change(self, event: Any) -> None:
+    def _handle_registry_change(self, event: Event) -> None:
         """Hide a newly created repair issue if the switch is OFF."""
         if self._is_on:
             return
